@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    .old-update-1y { background-color: #a6a6a6; } /* 1年以上前 */
+    .old-update-2y { background-color: #666666; color: white; } /* 2年以上前 */
+    .new-update { background-color: #b3e5fc; } /* 1ヶ月以内 */
+    .loading { font-size: 16px; color: gray; display: none; }
+    #admin-tab h2 {
+      margin: 0;
+      padding: 0;
+    }
+
+    #admin-tab h3 {
+      margin-top: 24px;
+      margin-bottom: 10px;
+    }
+
+    #admin-tab {
+      padding: 10px 20px;
+      position: relative;
+    }
+  </style>
+  <script>
+    // ★ Web公開CSVのURL（公表シート）
+    const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRhRdIzKcJP_tW-XUSjuHcsIFQVurGQzjoBfRY9kX2yOBhSz_8QBJ019TaF8En7dKfMgNaadBxFfDn1/pub?gid=1113729234&single=true&output=csv";
+
+    // ★ データ取得方式（true = CSV高速モード, false = APIモード）
+    let useCsvMode = (localStorage.getItem("useCsvMode") ?? "true") === "true";
+
+    const displayLabelMap = {
+      i: "成分名",
+      y: "YJコード",
+      p: "品名",
+      s: "出荷状況",
+      u1: "変更日",
+      r: "理由",
+      f: "解除見込み",
+      z: "時期",
+      q: "出荷量",
+      u2: "更新日"
+    };
+
+    function normalizeText(text) {
+      if (!text) return "";
+      return text
+        .toLowerCase()
+        .replace(/[Ａ-Ｚａ-ｚ０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 65248))
+        .replace(/[ァ-ン]/g, c => String.fromCharCode(c.charCodeAt(0) - 96))
+        .replace(/[‐‑‒–—―−ー－]/g, "-")
+        .replace(/／/g, "/");
+    }
+
+    // 厚労省Excelの更新日（APIから1回だけ取得してここに保持）
+    let excelUpdateDateRaw = "";
+
+    // ページ読み込み時に1回だけ Excel更新日を取得して、画面に表示する
+    function initExcelUpdateDate() {
+      const apiUrlForMeta = "https://script.google.com/macros/s/AKfycbzAjXjAoSYkyzvPTymXj_B58nRPN1WqfbR05O_xPHC-3sPAjzHy2_piZlnziOj7S6xo/exec";
+
+      fetch(apiUrlForMeta)
+        .then(res => res.json())
+        .then(data => {
+          const raw = data?.meta?.Excel更新日 || "";
+          excelUpdateDateRaw = raw;
+
+          const el = document.getElementById("excel-date-info");
+          if (!el) return;
+
+          if (raw) {
+            el.textContent = "厚労省Excelのデータ日: " + formatUpdateDate(raw);
+          } else {
+            el.textContent = "厚労省Excelのデータ日: 不明";
+          }
+        })
+        .catch(err => {
+          console.error("Excel更新日の取得に失敗:", err);
+          const el = document.getElementById("excel-date-info");
+          if (el) {
+            el.textContent = "厚労省Excelのデータ日: 不明";
+          }
+        });
+    }
+
+
+   // ▼ 検索実行（CSV / API 両対応の入口）
+   function fetchData() {
+     const searchTerm = document.getElementById("searchInput").value.trim();
+     if (!searchTerm) {
+       document.getElementById("result").innerHTML = "<p>検索ワードを入力してください。</p>";
+       return;
+     }
+
+     document.getElementById("loading").style.display = "block";
+     document.getElementById("searchInput").disabled = true;
+     document.getElementById("searchButton").disabled = true;
+
+     const words = searchTerm.split(/\s+/).map(normalizeText);
+
+     // ★ ここで CSVモード / APIモード を切り替え
+     if (useCsvMode) {
+       fetchFromCsv(words);
+     } else {
+       fetchFromApi(words);
+     }
+   }
+
+   // ▼ もとの API 方式（現行どおりの処理をそのまま関数化）
+   function fetchFromApi(words) {
+     const apiUrl = "https://script.google.com/macros/s/AKfycbzAjXjAoSYkyzvPTymXj_B58nRPN1WqfbR05O_xPHC-3sPAjzHy2_piZlnziOj7S6xo/exec";
+
+     fetch(apiUrl)
+       .then(response => response.json())
+       .then(data => {
+         finalizeLoadingState();
+
+         if (data.error) {
+           document.getElementById("result").innerHTML = "<p>エラー: " + data.error + "</p>";
+           return;
+         }
+
+         renderSearchResult(data, words);
+       })
+       .catch(error => {
+         finalizeLoadingState();
+         document.getElementById("result").innerHTML = "<p>データの取得に失敗しました。</p>";
+         console.error("エラー:", error);
+       });
+    }
+
+   // ▼ Web公開CSV から取得する新方式（検索専用・Excel更新日は触らない）
+   function fetchFromCsv(words) {
+     fetch(CSV_URL)
+       .then(res => {
+         if (!res.ok) {
+           throw new Error("CSVの取得に失敗しました");
+         }
+         return res.text();
+       })
+       .then(csvText => {
+         let data;
+         try {
+           data = convertCsvToJsonLikeApi(csvText); // { meta, data } の形で返る
+         } catch (e) {
+           finalizeLoadingState();
+           console.error("CSV変換エラー:", e);
+           document.getElementById("result").innerHTML =
+             "<p>CSVデータの変換に失敗しました。仕様変更の可能性があります。</p>"; 
+           return;
+         }
+
+         if (!data || !Array.isArray(data.data)) {
+           finalizeLoadingState();
+           document.getElementById("result").innerHTML =
+             "<p>CSVデータの形式に問題があります。</p>";
+           return;
+         }
+
+         finalizeLoadingState();
+         renderSearchResult(data, words);
+       })
+       .catch(err => {
+         finalizeLoadingState();
+         console.error("CSVモードエラー:", err);
+         document.getElementById("result").innerHTML =
+           "<p>CSV（Web公開データ）の取得に失敗しました。</p>";
+       });
+   }
+
+
+   // ▼ ローディング表示とボタン状態を元に戻す共通処理
+   function finalizeLoadingState() {
+     document.getElementById("loading").style.display = "none";
+     document.getElementById("searchInput").disabled = false;
+     document.getElementById("searchButton").disabled = false;
+   }
+
+   // ▼ API / CSV 共通の描画処理（元の fetchData 内の後半部分をそのまま移植）
+   function renderSearchResult(data, words) {
+    
+     let resultTable = "";
+
+     const columns = ["i", "y", "r", "f", "z"];
+     columns.forEach(key => {
+       resultTable += `<label><input type='checkbox' id='toggle${key}' onchange='toggleColumn("${key}")'> ${displayLabelMap[key]}</label>`;
+     });
+
+     resultTable += "<table border='1'><tr>";
+     resultTable += `<th class='optional i' style='display:none;'>${displayLabelMap["i"]}</th>`;
+     resultTable += `<th class='optional y' style='display:none;'>${displayLabelMap["y"]}</th>`;
+     resultTable += `<th>${displayLabelMap["p"]}</th>`;
+     resultTable += `<th>${displayLabelMap["s"]}</th>`;
+     resultTable += `<th>${displayLabelMap["u1"]}</th>`;
+     resultTable += `<th class='optional r' style='display:none;'>${displayLabelMap["r"]}</th>`;
+     resultTable += `<th class='optional f' style='display:none;'>${displayLabelMap["f"]}</th>`;
+     resultTable += `<th class='optional z' style='display:none;'>${displayLabelMap["z"]}</th>`;
+     resultTable += `<th>${displayLabelMap["q"]}</th>`;
+     resultTable += `<th>${displayLabelMap["u2"]}</th>`;
+     resultTable += "</tr>";
+
+     const filteredData = data.data.filter(item =>
+       words.every(word =>
+         Object.values(item).some(value =>
+           normalizeText(value.toString()).includes(word)
+         )
+       )
+     );
+
+     if (filteredData.length === 0) {
+       document.getElementById("result").innerHTML = "<p>該当するデータがありません。</p>";
+       return;
+     }
+
+     filteredData.forEach(item => {
+       const updateClass = getUpdateClass(item["u2"]);
+       const changeClass = getUpdateClass(item["u1"]);
+       resultTable += "<tr>";
+       resultTable += `<td class='optional i' style='display:none;'>${item["i"] || ""}</td>`;
+       resultTable += `<td class='optional y' style='display:none;'>${item["y"] || ""}</td>`;
+       resultTable += `<td class='p-name' data-yj='${item["y"] || ""}'>${item["p"] || ""}</td>`;
+       resultTable += `<td style='${getStatusColor(item["s"])}'>${item["s"] || ""}</td>`;
+       resultTable += `<td class='${changeClass}'>${formatShortDate(item["u1"])}</td>`;
+       resultTable += `<td class='optional r' style='display:none;'>${item["r"] || ""}</td>`;
+       resultTable += `<td class='optional f' style='display:none;'>${item["f"] || ""}</td>`;
+       resultTable += `<td class='optional z' style='display:none;'>${item["z"] || ""}</td>`;
+       resultTable += `<td>${item["q"] || ""}</td>`;
+       resultTable += `<td class='${updateClass}'>${formatShortDate(item["u2"])}</td>`;
+       resultTable += "</tr>";
+     });
+
+     resultTable += "</table>";
+     document.getElementById("result").innerHTML = resultTable;
+   }
+
+
+   // ▼ CSV → 既存JSON形式に変換するロジック（完成版）
+   function convertCsvToJsonLikeApi(csvText) {
+     // ---- 1) CSV文字列を2次元配列 rows に変換 ----
+     function parseCsv(text) {
+       const rows = [];
+       let row = [];
+       let cur = "";
+       let inQuotes = false;
+
+       for (let i = 0; i < text.length; i++) {
+         const c = text[i];
+
+         if (inQuotes) {
+           if (c === '"') {
+             // 連続する "" はエスケープされた1つの "
+             if (text[i + 1] === '"') {
+               cur += '"';
+               i++;
+             } else {
+               inQuotes = false;
+             }
+           } else {
+             cur += c;
+           }
+         } else {
+            if (c === '"') {
+             inQuotes = true;
+           } else if (c === ",") {
+             row.push(cur);
+             cur = "";
+           } else if (c === "\r") {
+             // 無視（\r\n 対応）
+             continue;
+           } else if (c === "\n") {
+             row.push(cur);
+             rows.push(row);
+             row = [];
+             cur = "";
+           } else {
+             cur += c;
+           }
+         }
+       }
+
+       // 最終行が改行で終わっていない場合のケア
+       if (cur.length > 0 || row.length > 0) {
+         row.push(cur);
+         rows.push(row);
+       }
+
+       return rows;
+     }
+
+     const rows = parseCsv(csvText);
+
+     // データ行が少なすぎる場合はエラー
+     if (!rows || rows.length < 3) {
+       console.error("CSVの行数が不足しています。");
+       return { error: "CSVの行数が不足しています。", data: [] };
+     }
+
+     // ---- 2) 2行目をヘッダーとして取得（GAS版と同じ前提） ----
+     const headers = rows[1].map(h => h.toString().trim());
+
+     // ---- 3) ヘッダー検索用マップ（GASの saveLightJsonToDrive と同じ）----
+     const headerMap = {
+       i:  { keywords: ["成分名"] },
+       y:  { keywords: ["YJコード"] },
+       p:  { keywords: ["品名"] },
+       s:  { keywords: ["出荷対応"] },
+       u1: { keywords: ["更新"], exclude: ["以外"] }, // ⑬: 「以外」が入らないほう
+       r:  { keywords: ["理由"] },
+       f:  { keywords: ["出荷停止", "見込み"], exclude: ["時期"] },
+       z:  { keywords: ["出荷停止", "見込み", "時期"] },
+       q:  { keywords: ["出荷量", "状況"] },
+       u2: { keywords: ["更新", "以外"] } // ⑳: 「以外」が入るほう
+     };
+
+     // ---- 4) ヘッダー位置を特定 ----
+     const indexes = {};
+     Object.entries(headerMap).forEach(([key, def]) => {
+       const keywords = def.keywords || [];
+       const exclude  = def.exclude  || [];
+       const idx = headers.findIndex(h =>
+         keywords.every(k => h.includes(k)) &&
+         exclude.every(k => !h.includes(k))
+       );
+       if (idx !== -1) {
+         indexes[key] = idx;
+       } else {
+         console.warn(`ヘッダー「${key}」に該当する列が見つかりません:`, def, headers);
+       }
+     });
+
+     if (Object.keys(indexes).length !== Object.keys(headerMap).length) {
+       // GAS版と同様、「仕様変更の可能性」としてエラーにする
+       throw new Error("必要なヘッダーの一部が見つかりません。仕様変更の可能性があります。");
+     }
+
+     // ---- 5) データ本体（3行目以降）を JSON 配列に変換 ----
+     const dataRows = rows.slice(2); // 0:タイトル行, 1:ヘッダー行, 2〜:データ
+
+     const records = dataRows
+       // 全セルが空の行はスキップ
+       .filter(row => row && row.some(cell => cell !== ""))
+       .map(row => {
+         const obj = {};
+         Object.entries(indexes).forEach(([key, idx]) => {
+           obj[key] = (row[idx] !== undefined && row[idx] !== null) ? row[idx] : "";
+         });
+         return obj;
+       });
+
+     // ---- 6) meta 情報を構築 ----
+     // Excel更新日そのものは、これまで通り API 側で管理する方針なので、
+     // ここでは空文字を入れておき、render 側では「不明」と表示される。
+     const meta = {
+       作成日時: new Date().toISOString(),
+       Excel更新日: "",           // ← ここは API 側からの meta を今後統合する余地あり
+       抽出件数: records.length,
+       列数: Object.keys(indexes).length
+     };
+
+     return { meta, data: records };
+    }
+
+
+
+    function getUpdateClass(dateStr) {
+      if (!dateStr) return "";
+      const date = new Date(dateStr);
+      const now = new Date();
+      const diffDays = (now - date) / (1000 * 60 * 60 * 24);
+      const diffYears = diffDays / 365;
+      if (diffDays <= 30) return "new-update";
+      if (diffYears >= 2) return "old-update-2y";
+      if (diffYears >= 1) return "old-update-1y";
+      return "";
+    }
+
+    function formatUpdateDate(dateStr) {
+      if (!dateStr) return "不明";
+      const date = new Date(dateStr);
+      return date.getFullYear() + "年" + (date.getMonth() + 1) + "月" + date.getDate() + "日";
+    }
+
+    function formatShortDate(dateStr) {
+      if (!dateStr) return "";
+      const date = new Date(dateStr);
+      return String(date.getFullYear()).slice(-2) + "/" +
+            ("0" + (date.getMonth() + 1)).slice(-2) + "/" +
+            ("0" + date.getDate()).slice(-2);
+    }
+
+    function getStatusColor(status) {
+      if (!status) return "";
+      if (status.includes("供給停止")) return "background-color: #ff6666; color: white;";
+      if (status.includes("限定出荷")) return "background-color: #ffff99; color: black;";
+      return "";
+    }
+
+    function toggleColumn(key) {
+      const show = document.getElementById("toggle" + key).checked;
+      document.querySelectorAll("." + key).forEach(cell => {
+        cell.style.display = show ? "" : "none";
+      });
+    }
+
+    function setupEnterKey() {
+      document.getElementById("searchInput").addEventListener("keypress", function(event) {
+        if (event.key === "Enter") {
+          fetchData();
+        }
+      });
+    }
+
+    function switchTab(mode) {
+      const searchTab = document.getElementById("search-tab");
+      const adminTab = document.getElementById("admin-tab");
+
+      if (mode === "admin") {
+       searchTab.style.display = "none";
+       adminTab.style.display = "block";
+       initDataModeControls();  // ★ 追加 Web公開直読みモード併用実装の際に追加 
+       fetchAdminContent();
+      } else {
+        searchTab.style.display = "block";
+        adminTab.style.display = "none";
+      }
+    }
+
+    function fetchAdminContent() {
+      const url = "https://script.google.com/macros/s/AKfycby83H_iRaJHXw9RxBFpHqxTscsrsrno_ZwkH80jV6Xj-qVbKNzw84PvBMQ7_7NOcOXV/exec?mode=latestLog";
+
+      fetch(url)
+        .then(res => res.json())
+       .then(data => {
+         if (!data || data.error) {
+           document.getElementById("admin-tab").innerHTML = `<p style="color:red;">エラー: ${data?.error || "取得失敗"}</p>`;
+            return;
+         }
+
+          if (!Array.isArray(data.logs)) {
+           document.getElementById("admin-tab").innerHTML = `<p style="color:red;">データ形式に問題があります。</p>`;
+           return;
+          }
+
+          const html = data.logs.map(log =>
+           `<div class="log-line">🕒 ${log.timestamp}｜<strong>${log.step}</strong>：${log.message}</div>`
+         ).join("");
+
+         document.getElementById("admin-log-area").innerHTML = `<div class="log-box">${html}</div>`;
+       })
+       .catch(err => {
+         document.getElementById("admin-tab").innerHTML = `<p style="color:red;">取得失敗: ${err}</p>`;
+       });
+    }
+
+    function initDataModeControls() {
+     const radios = document.querySelectorAll('input[name="dataMode"]');
+     if (!radios.length) return;
+
+     // 初期状態を反映
+     radios.forEach(r => {
+       if (useCsvMode && r.value === "csv") r.checked = true;
+       if (!useCsvMode && r.value === "api") r.checked = true;
+
+       r.addEventListener("change", () => {
+         useCsvMode = (r.value === "csv");
+         localStorage.setItem("useCsvMode", useCsvMode ? "true" : "false");
+       });
+     });
+   }
+
+    const initialYJCode = '<?= initialYJCode ?>';
+    window.addEventListener('DOMContentLoaded', () => {
+        // ★ ページ読み込み時に1回だけ Excel更新日を取得
+      initExcelUpdateDate();
+
+      if (initialYJCode) {
+        document.querySelector('#searchInput').value = initialYJCode;
+        fetchData();  // 自動検索実行
+      }
+      setupYJPrefixOpen(); // ← ダブルクリック動作を有効化
+    });
+
+    function setupYJPrefixOpen() {
+      // #result 内でのイベント委譲：動的に差し替わるテーブルでもOK
+      const container = document.getElementById('result');
+      container.addEventListener('dblclick', (e) => {
+        const cell = e.target.closest('td.p-name');
+        if (!cell) return;
+  
+        const yjRaw = (cell.dataset.yj || '').replace(/\D/g, '');
+        const prefix7 = yjRaw.slice(0, 7);
+        if (prefix7.length !== 7) return; // 7桁ない時は何もしない
+  
+       // ★ テンプレートリテラルを使わない安全版（全角や不可視文字の混入リスク回避）
+       var base = 'https://script.google.com/macros/s/AKfycby83H_iRaJHXw9RxBFpHqxTscsrsrno_ZwkH80jV6Xj-qVbKNzw84PvBMQ7_7NOcOXV/exec';
+       var url  = base + '?yj=' + encodeURIComponent(prefix7);
+
+        window.open(url, '_blank', 'noopener');
+      });
+    }
+
+  </script>
+</head>
+
+<body onload="setupEnterKey()">
+
+  <!-- タブ切り替え用のエリア：検索モード -->
+  <div id="search-tab">
+    <h2>医薬品供給状況の検索</h2>
+
+    <p style="color: gray; font-size: 11px;">
+      2025年5月13日から、厚労省のエクセル形式が変更されました。<br>
+      この日以降に「出荷状況」が更新された場合は「<strong>変更日</strong>」に、それ以外の情報の更新は「<strong>更新日</strong>」に日付が表示されます。<br>
+      2025年5月13日より前に更新された情報（出荷状況を含む）は「<strong>更新日</strong>」に記録されているため、<strong>変更日が空欄でも最新の出荷状況となります。</strong>
+    </p>
+    
+    <!-- ★ ここが新しく追加する更新日表示エリア -->
+    <div id="excel-date-info" style="font-size: 15px; margin: 4px 0 8px;">
+      厚労省Excelのデータ日: 読み込み中...
+    </div>
+
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <div>
+        <input type="text" id="searchInput" placeholder="検索ワードを入力">
+        <button id="searchButton" onclick="fetchData()">検索</button>
+      </div>
+      <!-- ✅ 管理ボタン：タブ切替 -->
+      <button onclick="switchTab('admin')" style="padding: 6px 12px;">管理</button>
+    </div>
+
+    <p style="font-size: 12px; color: #444; margin-top: 6px;">
+      <strong>薬品名をダブルクリック</strong>すると、その薬品コード（上7桁）で検索が可能になりました。
+    </p>
+
+
+    <p id="loading" class="loading">検索中...</p>
+    <div id="result"></div>
+  </div>
+
+  <!-- タブ切り替え用のエリア：管理モード -->
+  <div id="admin-tab" style="display:none; padding: 20px;">
+
+    <h2>管理モード</h2>
+
+   <div style="display: flex; justify-content: flex-end; margin-bottom: 16px;">
+      <button class="back-button" onclick="switchTab('search')">検索に戻る</button>
+   </div>
+
+   <h3>データ取得方式</h3>
+   <div id="data-mode-area" style="margin-bottom: 16px; font-size: 14px;">
+     <label style="margin-right: 12px;">
+       <input type="radio" name="dataMode" value="csv">
+       CSV高速モード（推奨）
+     </label>
+     <label>
+       <input type="radio" name="dataMode" value="api">
+       APIモード（バックアップ）
+     </label>
+     <div style="font-size: 11px; color: #555; margin-top: 4px;">
+       ※CSVで不具合を感じた場合はAPIモードに切り替えて動作確認できます。
+     </div>
+   </div>
+
+
+    <h3>データ更新ログ表示</h3>
+    <div id="admin-log-area">読み込み中...</div>
+
+    <h3 style="margin-top: 24px;">参照ページ</h3>
+    <p>
+      🔗 <a href="https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/kenkou_iryou/iryou/kouhatu-iyaku/04_00003.html" target="_blank">
+      厚生労働省 医療用医薬品の供給状況（公式ページ）
+     </a>
+   </p>
+  </div>
+
+</body>
+</html>
