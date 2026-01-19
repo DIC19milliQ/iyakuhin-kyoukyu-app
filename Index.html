@@ -54,6 +54,8 @@
 
     // 厚労省Excelの更新日（APIから1回だけ取得してここに保持）
     let excelUpdateDateRaw = "";
+    let csvCache = null;
+    let csvInFlightPromise = null;
 
     // ページ読み込み時に1回だけ Excel更新日を取得して、画面に表示する
     function initExcelUpdateDate() {
@@ -131,10 +133,42 @@
 
    // ▼ Web公開CSV から取得する新方式（検索専用・Excel更新日は触らない）
    function fetchFromCsv(words) {
-     fetch(CSV_URL)
+     ensureCsvCacheReady()
+       .then(cache => {
+         finalizeLoadingState();
+         renderSearchResult(cache.payload, words);
+       })
+       .catch(err => {
+         finalizeLoadingState();
+         console.error("CSVモードエラー:", err);
+         const message = err?.userMessage || "CSV（Web公開データ）の取得に失敗しました。";
+         document.getElementById("result").innerHTML = `<p>${message}</p>`;
+       });
+   }
+
+   function ensureCsvCacheReady() {
+     const shouldRefresh =
+       csvCache &&
+       excelUpdateDateRaw &&
+       csvCache.excelDateKey !== excelUpdateDateRaw;
+
+     if (shouldRefresh) {
+       csvCache = null;
+       csvInFlightPromise = null;
+     }
+
+     if (csvCache) {
+       return Promise.resolve(csvCache);
+     }
+
+     if (csvInFlightPromise) {
+       return csvInFlightPromise;
+     }
+
+     csvInFlightPromise = fetch(CSV_URL)
        .then(res => {
          if (!res.ok) {
-           throw new Error("CSVの取得に失敗しました");
+           throw { userMessage: "CSV（Web公開データ）の取得に失敗しました。", cause: res.status };
          }
          return res.text();
        })
@@ -143,29 +177,30 @@
          try {
            data = convertCsvToJsonLikeApi(csvText); // { meta, data } の形で返る
          } catch (e) {
-           finalizeLoadingState();
-           console.error("CSV変換エラー:", e);
-           document.getElementById("result").innerHTML =
-             "<p>CSVデータの変換に失敗しました。仕様変更の可能性があります。</p>"; 
-           return;
+           throw { userMessage: "CSVデータの変換に失敗しました。仕様変更の可能性があります。", cause: e };
          }
 
          if (!data || !Array.isArray(data.data)) {
-           finalizeLoadingState();
-           document.getElementById("result").innerHTML =
-             "<p>CSVデータの形式に問題があります。</p>";
-           return;
+           throw { userMessage: "CSVデータの形式に問題があります。" };
          }
 
-         finalizeLoadingState();
-         renderSearchResult(data, words);
+         data.meta = data.meta || {};
+         data.meta.Excel更新日 = excelUpdateDateRaw || "";
+
+         const nextCache = {
+           excelDateKey: excelUpdateDateRaw || null,
+           payload: data,
+           builtAt: Date.now()
+         };
+
+         csvCache = nextCache;
+         return nextCache;
        })
-       .catch(err => {
-         finalizeLoadingState();
-         console.error("CSVモードエラー:", err);
-         document.getElementById("result").innerHTML =
-           "<p>CSV（Web公開データ）の取得に失敗しました。</p>";
+       .finally(() => {
+         csvInFlightPromise = null;
        });
+
+     return csvInFlightPromise;
    }
 
 
