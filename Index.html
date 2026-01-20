@@ -56,6 +56,7 @@
     let excelUpdateDateRaw = "";
     let csvCache = null;
     let csvInFlightPromise = null;
+    let csvPrefetchDone = false;
 
     // ページ読み込み時に1回だけ Excel更新日を取得して、画面に表示する
     function initExcelUpdateDate() {
@@ -445,6 +446,19 @@
       });
     }
 
+    function setupCsvPrefetchOnFocus() {
+      const input = document.getElementById("searchInput");
+      if (!input) return;
+
+      input.addEventListener("focus", () => {
+        if (!useCsvMode || csvPrefetchDone) return;
+        csvPrefetchDone = true;
+        ensureCsvCacheReady().catch(err => {
+          console.warn("CSVプリフェッチに失敗:", err);
+        });
+      });
+    }
+
     function switchTab(mode) {
       const searchTab = document.getElementById("search-tab");
       const adminTab = document.getElementById("admin-tab");
@@ -507,6 +521,7 @@
     window.addEventListener('DOMContentLoaded', () => {
         // ★ ページ読み込み時に1回だけ Excel更新日を取得
       initExcelUpdateDate();
+      setupCsvPrefetchOnFocus();
 
       if (initialYJCode) {
         document.querySelector('#searchInput').value = initialYJCode;
