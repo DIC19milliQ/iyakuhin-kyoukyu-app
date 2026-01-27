@@ -533,19 +533,22 @@
     function setupYJPrefixOpen() {
       // #result 内でのイベント委譲：動的に差し替わるテーブルでもOK
       const container = document.getElementById('result');
+      if (!container) return;
       container.addEventListener('dblclick', (e) => {
         const cell = e.target.closest('td.p-name');
         if (!cell) return;
   
         const yjRaw = (cell.dataset.yj || '').replace(/\D/g, '');
         const prefix7 = yjRaw.slice(0, 7);
-        if (prefix7.length !== 7) return; // 7桁ない時は何もしない
-  
-       // ★ テンプレートリテラルを使わない安全版（全角や不可視文字の混入リスク回避）
-       var base = 'https://script.google.com/macros/s/AKfycby83H_iRaJHXw9RxBFpHqxTscsrsrno_ZwkH80jV6Xj-qVbKNzw84PvBMQ7_7NOcOXV/exec';
-       var url  = base + '?yj=' + encodeURIComponent(prefix7);
+        if (prefix7.length !== 7) {
+          console.warn("YJコードの先頭7桁が取得できませんでした。", { yjRaw });
+          return;
+        }
 
-        window.open(url, '_blank', 'noopener');
+        const searchInput = document.getElementById("searchInput");
+        if (!searchInput) return;
+        searchInput.value = prefix7;
+        fetchData();
       });
     }
 
